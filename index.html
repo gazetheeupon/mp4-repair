@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fix "moov atom not found" — Free MP4/MOV Repair (untrunc, in your browser)</title>
+<meta name="description" content="Repair a truncated or corrupted MP4, MOV, M4V or 3GP file that won't play — fix 'moov atom not found' from a crashed recording, free, entirely in your browser. Nothing is uploaded.">
+<link rel="stylesheet" href="https://gazetheeupon.github.io/shared-assets/theme.css?v=2">
+<link rel="canonical" href="https://gazetheeupon.github.io/mp4-repair/">
+<meta property="og:title" content="Free MP4/MOV Repair — fix &quot;moov atom not found&quot;">
+<meta property="og:description" content="Repair a truncated or corrupted video file entirely in your browser, free. The open-source untrunc tool, compiled to WebAssembly — nothing is uploaded.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gazetheeupon.github.io/mp4-repair/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Free MP4/MOV Repair — fix &quot;moov atom not found&quot;">
+<meta name="twitter:description" content="Repair a truncated or corrupted video file entirely in your browser, free. Nothing is uploaded.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "MP4/MOV Repair (untrunc online)",
+  "url": "https://gazetheeupon.github.io/mp4-repair/",
+  "description": "Free browser-based repair for truncated or corrupted MP4, MOV, M4V and 3GP files that fail with 'moov atom not found'. Runs entirely client-side; no file is ever uploaded.",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Any (runs in web browser)",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What does \"moov atom not found\" mean?",
+      "acceptedAnswer": { "@type": "Answer", "text": "It means the file's index (the \"moov\" box, which lists every track, frame, and duration) is missing, usually because the recording was interrupted — a crash, a dead battery, a full memory card, or an app killed mid-write — before that index could be written. The actual video and audio data is usually still intact in the file's \"mdat\" box; only the index is gone. This page's diagnostic checks exactly that, for free, in your browser." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is there an \"untrunc online\" or web version?",
+      "acceptedAnswer": { "@type": "Answer", "text": "This page is that: a build of the open-source untrunc tool compiled to WebAssembly so it runs directly in your browser, with no install and no command line. Untrunc itself has historically only existed as a command-line program that most affected users can't run." }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I repair a corrupted MP4 for free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Drop the broken file above to see what's actually wrong with it. If the diagnosis is a missing index (the common case), drop a second, working video from the same device and settings as a reference, then click Repair. Everything runs locally in your browser — nothing is uploaded anywhere, and there's no size limit beyond what your device's storage and memory can handle." }
+    },
+    {
+      "@type": "Question",
+      "name": "My OBS recording is corrupted after a crash — can this fix it?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Usually yes, if the crash happened after OBS started writing the file (so there's real video data in it) but before OBS finished and wrote the index. Use a short clip recorded with OBS using the identical output settings (same encoder, resolution, framerate, container) as your reference file." }
+    },
+    {
+      "@type": "Question",
+      "name": "My GoPro video won't play — what's wrong?",
+      "acceptedAnswer": { "@type": "Answer", "text": "If the camera died, the card filled up, or it was ejected mid-recording, the file can end up with its media data intact but no finished index — the same \"moov atom not found\" problem. Shoot a short clip in the same mode and resolution preset on the same GoPro to use as a reference file for repair." }
+    },
+    {
+      "@type": "Question",
+      "name": "My DJI drone video is corrupted — is it recoverable?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Often, if the drone lost power or the recording was interrupted (e.g. a forced landing or battery pull) rather than the SD card itself failing. Drop the file in above to see whether the index is what's actually missing before trying anything else." }
+    },
+    {
+      "@type": "Question",
+      "name": "A .mov file won't open after a crash — can I fix it?",
+      "acceptedAnswer": { "@type": "Answer", "text": "MOV uses the same underlying container format (ISO-BMFF) as MP4, and this tool handles both. The same diagnosis and repair approach applies: an interrupted write usually leaves the media data intact but the index missing." }
+    },
+    {
+      "@type": "Question",
+      "name": "My video file shows 0 seconds or no duration — why?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Most players read duration from the index (\"moov\") box. If that box is missing or incomplete, players have nothing to report a duration from, even though the frames themselves may still be there — which is exactly what this page's diagnostic checks for." }
+    },
+    {
+      "@type": "Question",
+      "name": "What can this tool NOT fix?",
+      "acceptedAnswer": { "@type": "Answer", "text": "If the actual video/audio bytes are missing — not just the index — no tool can rebuild frames that were never saved to disk. This also can't recover a file that was deleted from a card or drive (browsers can't read raw storage), and it doesn't repair corruption in the middle of otherwise-present frame data." }
+    }
+  ]
+}
+</script>
+<style>
+  :root{--bg:#0f1720;--card:#1a2532;--text:#e8edf2;--muted:#93a3b3;--accent:#4fa8ff;--border:#2a3745;--warn:#ffcf8a;--good:#7be0a8;--bad:#ff8080;}
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;}
+  header{padding:2rem 1rem 1rem;text-align:center;}
+  h1{font-size:1.5rem;margin:0 0 .4rem;}
+  p.sub{color:var(--muted);margin:0 auto;max-width:680px;}
+  main{max-width:780px;margin:0 auto;padding:1.5rem 1rem 3rem;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.2rem;}
+  .dropzone{border:2px dashed var(--border);border-radius:10px;padding:2rem 1rem;text-align:center;cursor:pointer;transition:border-color .15s;}
+  .dropzone.drag{border-color:var(--accent);}
+  .dropzone input{display:none;}
+  .dropzone .hint{color:var(--muted);font-size:.9rem;margin-top:.4rem;}
+  .dropzone.small{padding:1.2rem 1rem;}
+  .fname{font-size:.9rem;color:var(--text);margin-top:.6rem;word-break:break-all;text-align:center;}
+  #status{color:var(--muted);font-size:.9rem;margin-top:.8rem;min-height:1.2em;text-align:center;}
+  #status.warn{color:var(--bad);}
+  h2{font-size:1rem;margin:0 0 .8rem;color:var(--text);}
+  h3{font-size:.9rem;margin:0 0 .5rem;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;}
+  table.kv{width:100%;border-collapse:collapse;font-size:.85rem;}
+  table.kv td{padding:.35rem .5rem;border-bottom:1px solid var(--border);vertical-align:top;}
+  table.kv tr:last-child td{border-bottom:none;}
+  table.kv td:first-child{color:var(--muted);width:38%;white-space:nowrap;}
+  code{background:#0f1720;padding:.1rem .35rem;border-radius:4px;font-size:.85em;}
+  .banner{border-radius:10px;padding:.9rem 1rem;font-size:.9rem;margin-bottom:1rem;border:1px solid;}
+  .banner.good{background:rgba(123,224,168,.08);border-color:var(--good);color:var(--good);}
+  .banner.bad{background:rgba(255,128,128,.08);border-color:var(--bad);color:var(--bad);}
+  .banner.neutral{background:rgba(147,163,179,.08);border-color:var(--border);color:var(--text);}
+  .banner strong{display:block;margin-bottom:.2rem;font-size:.95rem;}
+  .privacy{font-size:.85rem;color:var(--muted);}
+  .hidden{display:none;}
+  #errorCard{border-color:var(--bad);}
+  #errorCard p{color:var(--bad);margin:0;}
+  #repairErrorCard{border-color:var(--bad);}
+  #repairErrorCard p{color:var(--bad);margin:0;}
+  .notice{font-size:.85rem;color:var(--warn);background:rgba(255,207,138,.08);border:1px solid var(--warn);border-radius:10px;padding:.8rem 1rem;margin-bottom:1.2rem;}
+  .repair-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+  @media (max-width:600px){.repair-grid{grid-template-columns:1fr;}}
+  .btn{background:var(--accent);border:none;color:#08131f;border-radius:8px;padding:.6rem 1.3rem;font-size:.9rem;font-weight:700;cursor:pointer;}
+  .btn:disabled{opacity:.4;cursor:not-allowed;}
+  .btn.secondary{background:transparent;border:1px solid var(--bad);color:var(--bad);}
+  .progress-track{background:#0f1720;border:1px solid var(--border);border-radius:8px;height:10px;overflow:hidden;margin:.6rem 0 .3rem;}
+  .progress-bar{background:var(--accent);height:100%;width:0%;transition:width .2s;}
+  .repair-meta{display:flex;justify-content:space-between;font-size:.8rem;color:var(--muted);}
+  #repairLog{background:#0f1720;border:1px solid var(--border);border-radius:8px;padding:.7rem;font-size:.78rem;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin-top:.6rem;}
+  details.device-help summary{cursor:pointer;color:var(--accent);font-size:.85rem;margin:.8rem 0 .4rem;}
+  details.device-help ul{font-size:.85rem;color:var(--muted);padding-left:1.2rem;}
+  .attribution{font-size:.78rem;color:var(--muted);border-top:1px solid var(--border);margin-top:1rem;padding-top:.9rem;}
+  .attribution a{color:var(--accent);}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fix "moov atom not found" &mdash; free MP4/MOV repair</h1>
+  <p class="sub">Drop a video that won't open to see exactly what's wrong, then repair it with a working reference file from the same device &mdash; entirely in your browser. Nothing is uploaded, no size limit, no install.</p>
+</header>
+<main>
+  <div class="card">
+    <div class="dropzone" id="dropzone">
+      <div>Drop the broken video here, or click to choose</div>
+      <div class="hint">.mp4, .mov, .m4v, .3gp &mdash; any size, nothing is uploaded anywhere</div>
+      <input type="file" id="fileInput" accept=".mp4,.mov,.m4v,.3gp,video/*">
+    </div>
+    <div class="fname" id="fname"></div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card hidden" id="errorCard"><p id="errorText"></p></div>
+
+  <div class="card hidden" id="resultsCard">
+    <h2>Diagnosis</h2>
+    <div id="summaryBanner"></div>
+    <table class="kv" id="detailTable"></table>
+  </div>
+
+  <div class="card hidden" id="repairSection">
+    <h2>Repair</h2>
+    <p class="privacy">This needs a second, <strong>working</strong> video from the same device and settings &mdash; the broken file lost its index (the part listing every frame), and the reference file supplies the codec and structure information needed to rebuild it.</p>
+
+    <details class="device-help">
+      <summary>I don't have a working video from this device</summary>
+      <ul>
+        <li><strong>OBS Studio:</strong> record a 5-second test clip with the identical output settings (same encoder, resolution, framerate, container).</li>
+        <li><strong>GoPro / DJI / action cameras:</strong> shoot a 5-second clip in the same mode and resolution preset.</li>
+        <li><strong>iPhone / Android:</strong> record 5 seconds with the same camera app at the same resolution and framerate.</li>
+        <li><strong>Sony (XAVC) and other camcorders:</strong> same idea, matching the recording format.</li>
+      </ul>
+    </details>
+
+    <div id="repairUnsupported" class="notice hidden">Your browser doesn't support the APIs this repair needs (Web Workers with an Origin Private File System sync access handle). Try a recent version of Chrome, Edge, Firefox, or Safari.</div>
+
+    <div id="repairControls">
+      <div class="repair-grid" style="margin-top:1rem;">
+        <div class="dropzone small" id="referenceDropzone">
+          <div>Drop the reference video</div>
+          <div class="hint">a working video, same device &amp; settings</div>
+          <input type="file" id="referenceInput" accept=".mp4,.mov,.m4v,.3gp,video/*">
+        </div>
+        <div>
+          <div class="fname" id="referenceFname" style="text-align:left;"></div>
+          <div id="repairWarning" class="notice hidden" style="margin-top:.4rem;"></div>
+          <button class="btn" id="repairBtn" disabled style="margin-top:.6rem;width:100%;">Repair</button>
+          <button class="btn secondary hidden" id="cancelBtn" style="margin-top:.5rem;width:100%;">Cancel</button>
+        </div>
+      </div>
+
+      <div class="hidden" id="repairProgressWrap" style="margin-top:1rem;">
+        <div class="progress-track"><div class="progress-bar" id="repairProgressBar"></div></div>
+        <div class="repair-meta"><span id="repairPhase"></span><span>Elapsed: <span id="repairElapsed">0s</span></span></div>
+        <details><summary style="cursor:pointer;color:var(--muted);font-size:.8rem;margin-top:.5rem;">Show log</summary><div id="repairLog"></div></details>
+      </div>
+
+      <div class="card hidden" id="repairResultCard" style="margin-top:1rem;margin-bottom:0;">
+        <p id="repairResultText" style="margin:0 0 .7rem;"></p>
+        <button class="btn" id="saveBtn">Save repaired file</button>
+      </div>
+
+      <div class="card hidden" id="repairErrorCard" style="margin-top:1rem;margin-bottom:0;"><p id="repairErrorText"></p></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <p class="privacy"><strong>How this works:</strong> an MP4/MOV/M4V/3GP file is a sequence of "boxes" &mdash; a small index box called <code>moov</code> (track list, durations, where every frame lives) and a (usually much larger) <code>mdat</code> box holding the actual encoded audio/video bytes. The diagnostic above reads only box headers &mdash; never the file's full contents &mdash; to tell whether the index is present and consistent with the media data. The repair step compiles the open-source <a href="https://github.com/anthwlock/untrunc" target="_blank" rel="noopener">untrunc</a> tool to WebAssembly and runs it in a Web Worker in your browser: it scans the reference file's structure and the broken file's raw media data to rebuild a working index, then writes the result to a private, sandboxed area of your browser's storage (never a server) that you then save wherever you like.</p>
+    <p class="privacy" style="margin-top:.8rem;"><strong>What this tool cannot do:</strong> recover media data that's genuinely missing from the end of a file (as opposed to just missing its index), recover a file deleted from a card or disk (browsers can't read raw storage), or fix corruption in the middle of otherwise-intact frame data.</p>
+    <p class="attribution">Repair is powered by <a href="https://github.com/anthwlock/untrunc" target="_blank" rel="noopener">untrunc</a>, originally by <a href="https://github.com/ponchio/untrunc" target="_blank" rel="noopener">Federico Ponchio</a>, maintained by <a href="https://github.com/anthwlock/untrunc" target="_blank" rel="noopener">anthwlock</a>, licensed <a href="https://github.com/anthwlock/untrunc/blob/master/COPYING" target="_blank" rel="noopener">GPL-2.0</a>. This page's own build of it &mdash; source, the exact patch applied, and build instructions &mdash; is published in this site's repository under the same license; see <code>LICENSE</code>, <code>patches/</code>, and <code>BUILD.md</code>.</p>
+  </div>
+
+  <div class="card faq">
+    <h2>Troubleshooting &amp; FAQ</h2>
+    <details><summary>What does "moov atom not found" mean?</summary>
+      <p>It means the file's index (the "moov" box, which lists every track, frame, and duration) is missing, usually because the recording was interrupted &mdash; a crash, a dead battery, a full memory card, or an app killed mid-write &mdash; before that index could be written. The actual video and audio data is usually still intact in the file's "mdat" box; only the index is gone. This page's diagnostic checks exactly that, for free, in your browser.</p>
+    </details>
+    <details><summary>Is there an "untrunc online" or web version?</summary>
+      <p>This page is that: a build of the open-source untrunc tool compiled to WebAssembly so it runs directly in your browser, with no install and no command line. Untrunc itself has historically only existed as a command-line program that most affected users can't run.</p>
+    </details>
+    <details><summary>How do I repair a corrupted MP4 for free?</summary>
+      <p>Drop the broken file above to see what's actually wrong with it. If the diagnosis is a missing index (the common case), drop a second, working video from the same device and settings as a reference, then click Repair. Everything runs locally in your browser &mdash; nothing is uploaded anywhere, and there's no size limit beyond what your device's storage and memory can handle.</p>
+    </details>
+    <details><summary>My OBS recording is corrupted after a crash &mdash; can this fix it?</summary>
+      <p>Usually yes, if the crash happened after OBS started writing the file (so there's real video data in it) but before OBS finished and wrote the index. Use a short clip recorded with OBS using the identical output settings (same encoder, resolution, framerate, container) as your reference file.</p>
+    </details>
+    <details><summary>My GoPro video won't play &mdash; what's wrong?</summary>
+      <p>If the camera died, the card filled up, or it was ejected mid-recording, the file can end up with its media data intact but no finished index &mdash; the same "moov atom not found" problem. Shoot a short clip in the same mode and resolution preset on the same GoPro to use as a reference file for repair.</p>
+    </details>
+    <details><summary>My DJI drone video is corrupted &mdash; is it recoverable?</summary>
+      <p>Often, if the drone lost power or the recording was interrupted (e.g. a forced landing or battery pull) rather than the SD card itself failing. Drop the file in above to see whether the index is what's actually missing before trying anything else.</p>
+    </details>
+    <details><summary>A .mov file won't open after a crash &mdash; can I fix it?</summary>
+      <p>MOV uses the same underlying container format (ISO-BMFF) as MP4, and this tool handles both. The same diagnosis and repair approach applies: an interrupted write usually leaves the media data intact but the index missing.</p>
+    </details>
+    <details><summary>My video file shows 0 seconds or no duration &mdash; why?</summary>
+      <p>Most players read duration from the index ("moov") box. If that box is missing or incomplete, players have nothing to report a duration from, even though the frames themselves may still be there &mdash; which is exactly what this page's diagnostic checks for.</p>
+    </details>
+    <details><summary>What can this tool NOT fix?</summary>
+      <p>If the actual video/audio bytes are missing &mdash; not just the index &mdash; no tool can rebuild frames that were never saved to disk. This also can't recover a file that was deleted from a card or drive (browsers can't read raw storage), and it doesn't repair corruption in the middle of otherwise-present frame data.</p>
+    </details>
+  </div>
+
+  <div id="ad-slot"></div>
+</main>
+<script src="bmff-diagnostic.js"></script>
+<script src="app.js"></script>
+<script defer src="https://gazetheeupon.github.io/shared-assets/site.js"></script>
+</body>
+</html>
