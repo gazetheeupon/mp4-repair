@@ -1,0 +1,426 @@
+--- a/src/file.h	2026-09-21 22:50:12.276276942 -0700
++++ b/src/file.h	2026-09-21 22:50:38.683518726 -0700
+@@ -71,9 +71,31 @@
+ 	size_t fillBuffer(off_t location);
+ 	uchar* buffer_;
+ 	off_t size_;
+-	FILE* file_ = nullptr;
+ 	off_t buf_begin_ = 0;
+ 	off_t buf_off_ = 0;
++#ifdef UNTRUNC_WASM_BUILD
++	// Under the WASM build, input bytes come from a JS-side registry of
++	// File/Blob objects (see worker.js's `self.wasmInputFiles`) rather than
++	// through libc's fopen/fread/fseeko, bypassing Emscripten's WORKERFS
++	// filesystem backend entirely. NOTE ON WHY: an earlier investigation
++	// pass suspected WORKERFS itself of corrupting large (>~500MB) reads;
++	// that theory was disproven by further isolation testing (see the long
++	// comment in file.cpp above wasm_input_open(), and
++	// test/large_file_test_findings.json) -- the real cause was an
++	// unrelated OPFS *output*-side storage-quota bug in Chromium's
++	// FileSystemSyncAccessHandle.write(). This direct-Blob input path is
++	// kept anyway because it's simpler than WORKERFS and was independently
++	// verified correct (SHA-256 match) at every tested size, not because it
++	// fixed that bug. This class already does its own large-chunk buffering
++	// (buffer_/buf_begin_/buf_off_/fillBuffer()), so all we replace is the
++	// single low-level "give me N bytes at absolute offset X" primitive,
++	// via one synchronous EM_JS call per fillBuffer(), with the return
++	// value always checked. `wasm_handle_` indexes into that JS-side
++	// registry.
++	int wasm_handle_ = -1;
++#else
++	FILE* file_ = nullptr;
++#endif
+ 
+ private:
+ 	static bool isRegularFile(int fd);
+@@ -96,7 +118,18 @@
+ 	void copyN(FileRead& fin, size_t start_off, size_t n);
+ 
+ protected:
++#ifdef UNTRUNC_WASM_BUILD
++	// Under the WASM build there is no real libc FILE* for the output side:
++	// output bytes are handed off, in strictly sequential/append order (see
++	// Atom::write() - untrunc never seeks backward on output), to a JS bridge
++	// that writes them into an OPFS synchronous access handle. `wasm_pos_` is
++	// a running byte counter standing in for ftello(); `wasm_filename_` is
++	// kept only for logging.
++	size_t wasm_pos_ = 0;
++	std::string wasm_filename_;
++#else
+ 	FILE *file_;
++#endif
+ };
+ 
+ bool isdir(const std::string& path);
+--- a/src/file.cpp	2026-09-21 22:50:12.276276942 -0700
++++ b/src/file.cpp	2026-09-21 21:58:27.749233105 -0700
+@@ -30,12 +30,146 @@
+ 
+ #include "common.h"
+ 
++#ifdef UNTRUNC_WASM_BUILD
++#include <emscripten.h>
++
++// JS bridges for the OPFS-backed output side of the WASM build. All of
++// untrunc's output writing (see Atom::write() in atom.cpp) is sequential /
++// append-only -- there is no seek-back-and-patch-size-field pattern -- so a
++// plain running byte offset (wasm_pos_) is sufficient; we never need real
++// random-access seeking on the output side.
++//
++// The actual OPFS FileSystemSyncAccessHandle is opened by worker.js BEFORE
++// wasm_entry() is invoked; wasm_output_open() here just records/logs the
++// name the C++ side thinks it's writing to.
++//
++// ROOT CAUSE NOTE (large-file corruption above ~450-530MB, investigated in
++// depth -- see test/large_file_test_findings.json for the full writeup):
++// this is NOT a bug in this write path, in FileWrite, or anywhere in
++// untrunc/WASM. It was root-caused, via byte-exact instrumentation of every
++// call this bridge makes plus a minimal reproduction with zero untrunc/WASM
++// code involved at all, to Chromium's `FileSystemSyncAccessHandle.write()`
++// returning a garbage sentinel (2^32-8, i.e. -8 reinterpreted as an
++// unsigned 32-bit count) instead of throwing once cumulative writes to one
++// access handle exceed the origin's OPFS storage quota
++// (`navigator.storage.estimate().quota`) -- which defaults to roughly
++// 400-500MB in a fresh/ephemeral browser profile such as a headless test
++// runner's, regardless of the chunk size used to get there. worker.js's own
++// JS-side position tracker (`currentBytesWritten`) then advances by that
++// bogus huge count, so every subsequent write lands at a wildly wrong
++// offset -- producing exactly the "fast but wrong, claims writing tens of
++// GB" symptom. This is invisible to FileWrite/wasm_output_write itself: the
++// bytes and lengths *this* bridge is asked to write are always correct (see
++// the isolation test in large_file_test_findings.json, which confirms the
++// C++ side requests exactly the right total every time). The practical
++// mitigation is on the host-page/worker side: request enough OPFS quota
++// before starting a repair (e.g. `--unlimited-storage` in a test harness;
++// in production, `navigator.storage.persist()` plus checking
++// `navigator.storage.estimate()` against the expected output size before
++// starting) -- see the coordinator report for the full explanation and
++// verification at scale.
++EM_JS(void, wasm_output_open, (const char* filename), {
++	if (typeof self.wasmOutputOpen === 'function') self.wasmOutputOpen(UTF8ToString(filename));
++});
++
++EM_JS(void, wasm_output_write, (const uint8_t* ptr, int len), {
++	if (typeof self.wasmOutputWrite === 'function') self.wasmOutputWrite(HEAPU8.subarray(ptr, ptr + len));
++});
++
++EM_JS(void, wasm_output_close, (), {
++	if (typeof self.wasmOutputClose === 'function') self.wasmOutputClose();
++});
++
++// JS bridges for the input side of the WASM build, used by FileRead. This
++// reads input bytes directly off a File/Blob (`self.wasmInputFiles`,
++// populated by worker.js before calling wasm_entry()) via one
++// Blob.slice() + FileReaderSync per FileRead::fillBuffer() call, rather
++// than through Emscripten's WORKERFS filesystem backend. This was
++// originally introduced on the theory that WORKERFS itself was corrupting
++// large reads; that theory was disproven by direct testing (WORKERFS's own
++// read() is structurally sound, and a hand-rolled replacement doing the
++// same slice+FileReaderSync work exhibited the identical corruption before
++// the true root cause -- an OPFS output-side storage-quota issue, see the
++// long comment on wasm_output_write above -- was fixed). This direct-Blob
++// input path is kept anyway: it is simpler than WORKERFS, was verified
++// correct via SHA-256 match at every tested size, and avoids WORKERFS's
++// extra layering, but it is not itself the fix for the large-file bug.
++//
++// NOTE: worker.js ALSO still mounts these same two files into Emscripten's
++// real WORKERFS at the same paths, because untrunc separately hands the
++// *reference* file's path straight to FFmpeg's own `avformat_open_input()`
++// (mp4.cpp's `parseHealthy()`) to probe codec/stream info -- that call is
++// entirely outside FileRead and needs the path to exist in the wasm
++// module's actual virtual filesystem. That probe only reads a small header
++// region, so leaving WORKERFS in place for it is safe; only the heavy,
++// whole-file sequential reading that untrunc's own FileRead does (the thing
++// that actually scales with input size) uses this direct-Blob path.
++EM_JS(int, wasm_input_open, (const char* filename), {
++	if (!self.__wasmFileReaderSync) self.__wasmFileReaderSync = new FileReaderSync();
++	if (!self.__wasmInputHandles) self.__wasmInputHandles = [];
++	var name = UTF8ToString(filename);
++	var file = self.wasmInputFiles && self.wasmInputFiles[name];
++	if (!file) return -1;
++	var handle = self.__wasmInputHandles.length;
++	self.__wasmInputHandles.push(file);
++	return handle;
++});
++
++EM_JS(double, wasm_input_size, (int handle), {
++	var file = self.__wasmInputHandles && self.__wasmInputHandles[handle];
++	return file ? file.size : -1;
++});
++
++EM_JS(int, wasm_input_read, (int handle, double position, uint8_t* ptr, int len), {
++	if (len <= 0) return 0;
++	var file = self.__wasmInputHandles && self.__wasmInputHandles[handle];
++	if (!file) return -1;
++	var chunk = file.slice(position, position + len);
++	var ab = self.__wasmFileReaderSync.readAsArrayBuffer(chunk);
++	var view = new Uint8Array(ab);
++	HEAPU8.set(view, ptr);
++	return view.length;
++});
++
++EM_JS(void, wasm_input_close, (int handle), {
++	if (self.__wasmInputHandles) self.__wasmInputHandles[handle] = null;
++});
++#endif
++
+ using namespace std;
+ 
+ FileRead::FileRead(const string& filename) {
+ 	open(filename);
+ }
+ 
++#ifdef UNTRUNC_WASM_BUILD
++
++FileRead::~FileRead() {
++	if (wasm_handle_ >= 0) {
++		wasm_input_close(wasm_handle_);
++		free(buffer_);
++	}
++}
++
++void FileRead::open(const string& filename) {
++	filename_ = filename;
++	wasm_handle_ = wasm_input_open(filename.c_str());
++	if (wasm_handle_ < 0) throw("Could not open file '" + filename + "': not found in wasmInputFiles registry");
++
++	double sz = wasm_input_size(wasm_handle_);
++	if (sz < 0) throw("Could not stat file '" + filename + "'");
++	size_ = (off_t) sz;
++
++	buffer_ = (uchar*) malloc(buf_size_);
++	off_t want = min((off_t)buf_size_, size_);
++	if (want > 0) {
++		int n = wasm_input_read(wasm_handle_, 0.0, buffer_, (int)want);
++		if (n < 0) throw("Read failed opening file '" + filename + "'");
++	}
++}
++
++#else
++
+ FileRead::~FileRead() {
+ 	if(file_){
+ 		fclose(file_);
+@@ -59,6 +193,8 @@
+ 	fread(buffer_, 1, buf_size_, file_);
+ }
+ 
++#endif // UNTRUNC_WASM_BUILD
++
+ void FileRead::seek(off_t p) {
+ 	if (p < buf_begin_ || p >= buf_begin_ + buf_size_){
+ 		fillBuffer(p);
+@@ -78,6 +214,31 @@
+ 	return pos() >= size_;
+ }
+ 
++#ifdef UNTRUNC_WASM_BUILD
++
++size_t FileRead::fillBuffer(off_t location) {
++	off_t avail = (buf_begin_+buf_size_) - location;
++	off_t buf_loc = location - buf_begin_;
++
++	buf_begin_ = location;
++	buf_off_ = 0;
++	if (avail < 0 || avail >= buf_size_) {
++		off_t want = min((off_t)buf_size_, size_ - location);
++		if (want <= 0) return 0;
++		int n = wasm_input_read(wasm_handle_, (double)location, buffer_, (int)want);
++		return n < 0 ? 0 : (size_t)n;
++	} else if (avail > 0) {
++		memmove(buffer_, buffer_+buf_loc, buf_size_-buf_loc);
++	}
++	off_t read_pos = location + avail;
++	off_t want = min((off_t)(buf_size_-avail), size_ - read_pos);
++	if (want <= 0) return 0;
++	int n = wasm_input_read(wasm_handle_, (double)read_pos, buffer_+avail, (int)want);
++	return n < 0 ? 0 : (size_t)n;
++}
++
++#else
++
+ size_t FileRead::fillBuffer(off_t location) {
+ 	off_t avail = (buf_begin_+buf_size_) - location;
+ 	off_t buf_loc = location - buf_begin_;
+@@ -95,6 +256,8 @@
+ 	return n;
+ }
+ 
++#endif // UNTRUNC_WASM_BUILD
++
+ size_t FileRead::readBuffer(uchar* dest, size_t size, size_t n) {
+ 	logg(VV, "requests: ", size*n, " at offset : ", buf_off_, '\n');
+ 	size_t total = size*n;
+@@ -107,9 +270,26 @@
+ 		total -= avail;
+ 		buf_off_ = buf_size_;
+ 		if (total >= to_uint(buf_size_)){
++#ifdef UNTRUNC_WASM_BUILD
++			// Equivalent to the native branch's "big fread continuing from
++			// wherever the FILE* cursor is": that cursor is always exactly
++			// buf_begin_+buf_size_ here (see file.h's wasm_handle_ comment),
++			// so read explicitly at that absolute position instead of
++			// relying on any implicit stream cursor.
++			off_t cur_pos = buf_begin_ + buf_size_;
++			off_t want = min((off_t)total, size_ - cur_pos);
++			size_t x = 0;
++			if (want > 0) {
++				int n = wasm_input_read(wasm_handle_, (double)cur_pos, dest+nread, (int)want);
++				x = n < 0 ? 0 : (size_t)n;
++			}
++			nread += x;
++			fillBuffer(cur_pos + (off_t)x);
++#else
+ 			size_t x = fread(dest+nread, 1, total, file_);
+ 			nread += x;
+ 			fillBuffer(ftello(file_));
++#endif
+ 		} else {
+ 			size_t x = min(fillBuffer(buf_begin_+buf_off_), total);
+ 			memcpy(dest+nread, buffer_, x);
+@@ -206,6 +386,69 @@
+ }
+ 
+ 
++#ifdef UNTRUNC_WASM_BUILD
++
++FileWrite::FileWrite(const string& filename) {
++	wasm_filename_ = filename;
++	wasm_pos_ = 0;
++	wasm_output_open(filename.c_str());
++}
++
++FileWrite::~FileWrite() {
++	wasm_output_close();
++}
++
++off_t FileWrite::pos() {
++	return (off_t) wasm_pos_;
++}
++
++int FileWrite::writeInt(int n) {
++	n = swap32(n);
++	wasm_output_write((const uint8_t*)&n, sizeof(int));
++	wasm_pos_ += sizeof(int);
++	return 4;
++}
++
++int FileWrite::writeInt64(int64_t n) {
++	n = swap64(n);
++	wasm_output_write((const uint8_t*)&n, sizeof(n));
++	wasm_pos_ += sizeof(n);
++	return 8;
++}
++
++int FileWrite::writeChar(const char *source, size_t n) {
++	wasm_output_write((const uint8_t*)source, n);
++	wasm_pos_ += n;
++	return n;
++}
++
++int FileWrite::writeChar(const uchar *source, size_t n) {
++	wasm_output_write((const uint8_t*)source, n);
++	wasm_pos_ += n;
++	return n;
++}
++
++int FileWrite::write(vector<uchar> &v) {
++	wasm_output_write((const uint8_t*)&*v.begin(), v.size());
++	wasm_pos_ += v.size();
++	return v.size();
++}
++
++void FileWrite::copyRange(FileRead& fin, size_t a, size_t b) {
++	fin.seek(a);
++	size_t n = b - a;
++	size_t buff_sz = 1<<16;
++	while (n) {
++		auto to_read = min(buff_sz, n);
++		auto p = fin.getPtr2(to_read);
++		wasm_output_write((const uint8_t*)p, to_read);
++		wasm_pos_ += to_read;
++		n -= to_read;
++	}
++}
++
++#else
++
+ FileWrite::FileWrite(const string& filename) {
+ 	file_ = my_open(filename.c_str(), "wb");
+ 	if(!file_)
+@@ -260,6 +503,8 @@
+ 	}
+ }
+ 
++#endif // UNTRUNC_WASM_BUILD
++
+ void FileWrite::copyN(FileRead& fin, size_t start_off, size_t n) {
+ 	copyRange(fin, start_off, start_off + n);
+ }
+--- a/src/main.cpp	2026-09-21 22:50:12.277586183 -0700
++++ b/src/main.cpp	2026-09-21 21:09:15.873300621 -0700
+@@ -90,6 +90,18 @@
+ 	g_range_end = s2.size() ? stoll(s2) : numeric_limits<int64_t>::max();
+ }
+ 
++#ifdef UNTRUNC_WASM_BUILD
++// Under this old Emscripten (3.1.6), a two-argument `main(int, char**)`
++// compiles only to an internal `__main_argc_argv` symbol and never gets a
++// literal exported `main` in non-STANDALONE_WASM (JS) builds, so wasm-ld's
++// implicit `--entry=main` (and emcc's `callMain`/`_main` JS glue) can't find
++// it and silently drops the whole function during --gc-sections. Renaming
++// the defined function sidesteps that: `main` is never actually defined in
++// the wasm build, so nothing requires the special entry-point handling, and
++// we invoke the renamed function ourselves from a plain exported C function.
++#define main untrunc_wasm_real_main
++#endif
++
+ int main(int argc, char *argv[]) {
+ 	const int kExpectArg = -22;
+ 	bool show_info = false;
+@@ -232,3 +244,45 @@
+ 	chkHiddenWarnings();
+ 	return 0;
+ }
++
++#ifdef UNTRUNC_WASM_BUILD
++#undef main
++#include <cstring>
++#include <vector>
++#include <emscripten.h>
++
++// Bridges a 0-100 progress percentage out to the worker's outer JS scope.
++// Note: g_onProgress/outProgress() is called independently by several
++// distinct sub-phases of the repair (offset scanning, frame matching, mdat
++// rewrite, etc. -- see call sites in atom.cpp/mp4.cpp/rsv.cpp), each of
++// which restarts its own 0-100 sweep. It is therefore NOT one single
++// monotonically-increasing global counter across an entire repair; a UI
++// consuming this should treat each run of increasing values as "progress
++// within the current phase", not "progress through the whole job".
++static void wasm_report_progress(int pct) {
++	EM_ASM({ if (typeof self.onWasmProgress === 'function') self.onWasmProgress($0); }, pct);
++}
++
++// Plain-C exported entry point for the WASM build. `packed_args` is a
++// single string with one CLI argument per line (argv[0] is synthesized).
++// Avoids relying on emscripten's callMain()/_main handling, which does not
++// work for a two-argument main() under this emscripten version (see above).
++extern "C" int wasm_entry(const char* packed_args) {
++	g_onProgress = wasm_report_progress;
++
++	std::vector<std::string> parts;
++	std::string s(packed_args ? packed_args : "");
++	size_t start = 0;
++	while (true) {
++		size_t pos = s.find('\n', start);
++		std::string part = (pos == std::string::npos) ? s.substr(start) : s.substr(start, pos - start);
++		if (!part.empty()) parts.push_back(part);
++		if (pos == std::string::npos) break;
++		start = pos + 1;
++	}
++	std::vector<char*> argv_vec;
++	argv_vec.push_back((char*)"untrunc");
++	for (auto& p : parts) argv_vec.push_back(const_cast<char*>(p.c_str()));
++	return untrunc_wasm_real_main((int)argv_vec.size(), argv_vec.data());
++}
++#endif
